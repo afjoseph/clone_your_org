@@ -85,11 +85,25 @@ func backupRepoIssuesAndPRs(client *github.Client, ctx context.Context,
 		fd.WriteString(fmt.Sprintf("* Issue #%d: %s\r\n", *issue.Number, *issue.Title))
 		fd.WriteString(fmt.Sprintf("* Created at: %v\r\n", *issue.CreatedAt))
 		fd.WriteString(fmt.Sprintf("* Author: %s\r\n", *issue.User.Login))
+		if issue.Labels != nil {
+			fd.WriteString("* Labels: ")
+			for i, label := range issue.Labels {
+				if i > 0 {
+					fd.WriteString(", ")
+				}
+				fd.WriteString(*label.Name)
+			}
+			fd.WriteString("\r\n")
+		}
 		if issue.ClosedBy != nil {
 			fd.WriteString(fmt.Sprintf("* Closed at: %s\r\n", *issue.ClosedAt))
 			fd.WriteString(fmt.Sprintf("* Closed by: %s\r\n", *issue.ClosedBy.Login))
 		}
 		fd.WriteString("\r\n")
+		if issue.Body != nil {
+			fd.WriteString("## Description\r\n\r\n")
+			fd.WriteString(fmt.Sprintf("%s\r\n\r\n", *issue.Body))
+		}
 
 		comments, _, err := client.Issues.ListComments(ctx, *repo.Owner.Login,
 			*repo.Name, *issue.Number, nil)
