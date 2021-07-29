@@ -16,12 +16,11 @@ import (
 )
 
 var (
-	GitAccessTokenFlag   = flag.String("git_access_token", "", "REQUIRED: Git OAuth2 access token")
-	OrganizationNameFlag = flag.String("target_organization_name", "", "REQUIRED: Name of the GH organization to backup")
-	BackupDirPathFlag    = flag.String("backup_dir", "", "OPTIONAL: backup directory. If you don't supply one, it'll be created in the root of the project")
+	GitAccessTokenFlag           = flag.String("git_access_token", "", "REQUIRED: Git OAuth2 access token")
+	OrganizationNameFlag         = flag.String("target_organization_name", "", "REQUIRED: Name of the GH organization to backup")
+	BackupDirPathFlag            = flag.String("backup_dir", "", "OPTIONAL: backup directory. If you don't supply one, it'll be created in the root of the project")
+	forceUpdateExistingReposFlag = flag.Bool("force_update_existing_repos", false, "OPTIONAL: force update existing repos, if any were found in backup_dir")
 )
-
-const maxElementsPerPage = 100000000
 
 func getGitClient(token string) (*github.Client, context.Context, error) {
 	if len(token) == 0 {
@@ -41,6 +40,11 @@ func cloneRepo(client *github.Client, ctx context.Context,
 
 	targetDir := filepath.Join(backupDirPath, fmt.Sprintf("%s.git", *repo.Name))
 	print.Debugf("Cloning %s to %s...\n", *repo.SSHURL, targetDir)
+	// Skip repo if already exists
+	if !*forceUpdateExistingReposFlag && util.IsDirectory(targetDir) {
+		print.Debugf("Skipping existing repo at %s\n", targetDir)
+		return nil
+	}
 	_, _, _, err := util.Exec("", "git clone --mirror --recurse-submodules -j8 %s %s",
 		*repo.SSHURL, targetDir)
 	if err != nil {
@@ -64,19 +68,39 @@ func backupRepoIssuesAndPRs(client *github.Client, ctx context.Context,
 	print.DebugFunc()
 
 	targetDir := filepath.Join(backupDirPath, fmt.Sprintf("%s__issues", *repo.Name))
-	os.MkdirAll(targetDir, os.ModePerm)
-	issues, _, err := client.Issues.ListByRepo(ctx,
-		*repo.Owner.Login, *repo.Name, &github.IssueListByRepoOptions{
-			State:       "all",
-			ListOptions: github.ListOptions{PerPage: maxElementsPerPage},
-		})
-	if err != nil {
-		return err
+	// if !*forceUpdateExistingReposFlag && util.IsDirectory(targetDir) {
+	// 	print.Debugf("Skipping existing issues repo at %s\n", targetDir)
+	// 	return nil
+	// }
+	var allIssues []*github.Issue
+	opts := &github.IssueListByRepoOptions{
+		State:       "all",
+		ListOptions: github.ListOptions{PerPage: 100000},
 	}
-	print.Debugf("Backing up %d issues for repo %s to %s\n", len(issues), *repo.Name, targetDir)
-	for _, issue := range issues {
+	pageCount := 0
+	for {
+		print.Debugf("Fetching issues on page %d (total fetched: %d)...\n", pageCount, len(allIssues))
+		issues, resp, err := client.Issues.ListByRepo(ctx,
+			*repo.Owner.Login, *repo.Name, opts)
+		if err != nil {
+			return err
+		}
+		allIssues = append(allIssues, issues...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+		pageCount++
+	}
+	print.Debugf("Backing up %d issues for repo %s to %s\n", len(allIssues), *repo.Name, targetDir)
+	os.MkdirAll(targetDir, os.ModePerm)
+	for _, issue := range allIssues {
 		// XXX I think 6 digits is a pretty decent limit
 		issueFilePath := filepath.Join(targetDir, fmt.Sprintf("%06d.md", *issue.Number))
+		if !*forceUpdateExistingReposFlag && util.IsFile(issueFilePath) {
+			print.Debugf("Skipping existing issue #%d\n", *issue.Number)
+			return nil
+		}
 		print.Debugf("Backing up issue #%d to %s\n", *issue.Number, issueFilePath)
 		fd, err := os.Create(issueFilePath)
 		if err != nil {
@@ -171,11 +195,25 @@ func _main() error {
 
 	// List Org repos and start the backup process
 	// -----------
-	repos, _, err := client.Repositories.ListByOrg(ctx, *OrganizationNameFlag, nil)
-	if err != nil {
-		return err
+	var allRepos []*github.Repository
+	opts := &github.RepositoryListByOrgOptions{ListOptions: github.ListOptions{PerPage: 100}}
+	pageCount := 0
+	for {
+		print.Debugf("Fetching repos on page %d (total fetched %d)...\n", pageCount, len(allRepos))
+		repos, resp, err := client.Repositories.ListByOrg(ctx, *OrganizationNameFlag, opts)
+		if err != nil {
+			return err
+		}
+		allRepos = append(allRepos, repos...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+		pageCount++
 	}
-	for _, repo := range repos {
+
+	print.Debugf("Cloning %d repos from %s org\n", len(allRepos), *OrganizationNameFlag)
+	for _, repo := range allRepos {
 		print.Debugf("working with %s\n", *repo.Name)
 		err = cloneRepo(client, ctx, backupDirPath, repo)
 		if err != nil {
